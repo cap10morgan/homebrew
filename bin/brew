@@ -68,7 +68,6 @@ begin
   cmd = aliases[cmd] if aliases[cmd]
 
   # Add example external commands to PATH before checking.
-  path = ENV['PATH']
   ENV['PATH'] += ":#{HOMEBREW_REPOSITORY}/Library/Contributions/cmds"
 
   if which "brew-#{cmd}"
@@ -76,11 +75,7 @@ begin
       ENV["HOMEBREW_#{e}"] = Object.const_get "HOMEBREW_#{e}"
     end
     exec "brew-#{cmd}", *ARGV
-  end
-
-  ENV['PATH'] = path
-
-  if require? `/usr/bin/which brew-#{cmd}.rb`
+  elsif require? `/usr/bin/which brew-#{cmd}.rb`
     exit 0
   elsif require? HOMEBREW_REPOSITORY/"Library/Homebrew/cmd"/cmd
     Homebrew.send cmd.to_s.gsub('-', '_')
