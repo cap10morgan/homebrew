@@ -24,47 +24,63 @@ def cmake_prefixes
     end
   end
 end
-def cflags
-  if ccc? 'Ob'
-    %w{-mtune=generic -Oz}
-  elsif ccc? 'O'
-    u = '-arch i386 -arch x86_64' if ccc? 'u'
-    c = case $0.basename when 'clang', 'clang++' then '-march=native' end
-    %w{-pipe -w -Os} << u << c
+def cc
+  case cc = ENV['CC'].basename.chuzzle when /gcc/
+    cc
   else
-    []
+    'clang'
   end
-end
-def ldflags
-  cmake_prefixes.map{|prefix| "#{prefix}/lib" }.to_flags('-L')
-end
-def cppflags
-  all = cmake_prefixes.map{|prefix| "#{prefix}/include" }
-  opt = all.select{|prefix| prefix =~ %r{^#$brewfix/opt} }
-  sys = all - opt + ENV['CMAKE_INCLUDE_PATH'].split(':')
-  # we want our keg-only includes to be found before system includes so that
-  # they override the system options.
-  sys.to_flags('-isystem') + opt.to_flags('-I')
 end
 
 class Cmd
   def initialize path, args
-    @tool = path.basename.freeze
+    @cmd = path.basename.freeze
     @args = args.freeze
-    @mode = case @tool
-      when 'cpp' then :cpp
-      when 'ld' then :ld
-    when /^clang/, /^llvm/, 'gcc', 'g++', 'cc', 'c++', nil
-      if args.include? '-c'
-        :cc
-      elsif args.include? '-E'
-        :cpp
-      else
-        :ld # compile *and* link mode usually but args will be same
-      end
+  end
+  def mode
+    if @cmd == 'cpp' or @cmd == 'ld'
+      @cmd.to_sym
+    elsif @args.include? '-c'
+      :cc
     else
-      abort "Unknown command: #{path}"
-    end.freeze
+      :ccld
+    end
+  end
+  def tool
+    case @cmd
+      when 'clang', 'cc' then 'clang'
+      when 'clang++', 'c++' then 'clang++'
+      when /gcc/ then 'gcc'
+      when /g\+\+/ then 'g++'
+      when 'ld', 'cpp' then cc
+    else
+      abort "Unknown command: #{@cmd}"
+    end
+  end
+  def args
+    args = if ccc? 'O'
+      parsed_args
+    else
+      @args.dup
+    end
+    args.unshift("--sysroot=#$sdkroot") if nclt?
+    case mode
+    when :cpp
+      %w{-E} + cppflags + args
+    when :ld
+      ldflags + args
+    when :cc
+      cflags + cppflags + args
+    when :ccld
+      cflags + cppflags + ldflags + args
+    end.compact
+  end
+  def xcrun
+    if nclt?
+      %W{xcrun #{tool}}
+    else
+      %W{/usr/bin/#{tool}}
+    end
   end
   def parsed_args
     args = []
@@ -88,46 +104,32 @@ class Cmd
     end
     args
   end
-  def args
-    args = if ccc? 'O' and false
-      parsed_args
+  def cflags
+    if ccc? 'Ob'
+      %w{-mtune=generic -Oz}
+    elsif ccc? 'O'
+      u = '-arch i386 -arch x86_64' if ccc? 'u'
+      c = case tool when 'clang', 'clang++' then '-march=native' end
+      %w{-pipe -w -Os} << u << c
     else
-      @args.dup
+      []
     end
-    args.unshift("--sysroot=#$sdkroot") if nclt?
-    case @mode
-    when :cpp
-      args.unshift("-E") unless args.include? '-E'
-    when :cc
-      args.unshift("-c") unless args.include? '-c'
-    end
-    case @mode
-    when :cpp
-      cppflags + args
-    when :cc
-      cflags + cppflags + args
-    when :ld
-      args = cflags + cppflags + args if @tool != "ld"
-      ldflags + args
-    end.compact
   end
-  def xcrun
-    # we invoke CC for all modes because build systems suck and this is more reliable
-    cc = case @tool
-      when 'ld', 'cpp' then ENV['CC'].basename.chuzzle || 'clang'
-      else @tool
-    end
-    if nclt?
-      %W{xcrun #{cc}}
-    else
-      %W{/usr/bin/#{cc}}
-    end
+  def ldflags
+    cmake_prefixes.map{|prefix| "#{prefix}/lib" }.to_flags('-L')
+  end
+  def cppflags
+    all = cmake_prefixes.map{|prefix| "#{prefix}/include" }
+    opt = all.select{|prefix| prefix =~ %r{^#$brewfix/opt} }
+    sys = all - opt + ENV['CMAKE_INCLUDE_PATH'].split(':')
+    # we want our keg-only includes to be found before system includes so that
+    # they override the system options.
+    sys.to_flags('-isystem') + opt.to_flags('-I')
   end
 end
 
 ####################################################################### extend
 class String
-  def parent; File.dirname self end
   def directory?; File.directory? self end
   def basename; File.basename self end
   def chuzzle; s = chomp; s unless s.empty? end
@@ -136,7 +138,6 @@ end
 class NilClass
   def chuzzle; end
   def directory?; false end
-  def parent; end
   def split(x); [] end
 end
 class Array
