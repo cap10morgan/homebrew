@@ -1,31 +1,9 @@
 #!/usr/bin/ruby
-#TODO allow specification of HOMEBREW_CCC to `brew --env` so gem can install against brew's libxml2 etc.
-#TODO keep x11 out of it unless a CCC-opt?
-#TODO troubleshooting flag that removes or adds all CCC-opts
-#when depending on keg-onlys prevent conflicting -Is like eg. cairo
-#TODO force our directories ahead of system directories
-#dedupe -I, -L and -F for legibility
-#TODO stuff that will be included with <> must be -isystem included for serious
 #TODO make it work with our GCC
 #TODO look for formula that adjust LDFLAGS/CPPFLAGS for deps and make them work
+#TODO try to create /usr/local/opt before merge
+#TODO? If we find -mmacosx-version-min=10.8, change sdkroot? warn visibly if no such SDK?
 
-class String
-  def parent; File.dirname self end
-  def directory?; File.directory? self end
-  def basename; File.basename self end
-  def chuzzle; s = chomp; s unless s.empty? end
-end
-class NilClass
-  def chuzzle; end
-  def directory?; false end
-  def parent; end
-  def split(x); [] end
-end
-class Array
-  def to_flags prefix
-    select{|path| path.directory? }.uniq.map{|path| prefix+path }
-  end
-end
 def ccc? flags
   flags.split('').all?{|c| ENV['HOMEBREW_CCC'].include? c } if ENV['HOMEBREW_CCC']
 end
@@ -46,20 +24,12 @@ def cmake_prefixes
     end
   end
 end
-def driver
-  case $0
-    when 'cpp' then :cpp
-    when 'ld' then :ld
-    when /^clang/ then :clang
-    when /^llvm/, 'gcc', 'g++' then :gcc
-  end
-end
 def cflags
   if ccc? 'Ob'
     %w{-mtune=generic -Oz}
   elsif ccc? 'O'
     u = '-arch i386 -arch x86_64' if ccc? 'u'
-    c = case $0 when 'clang', 'clang++' then '-march=native' end
+    c = case $0.basename when 'clang', 'clang++' then '-march=native' end
     %w{-pipe -w -Os} << u << c
   else
     []
@@ -76,34 +46,104 @@ def cppflags
   # they override the system options.
   sys.to_flags('-isystem') + opt.to_flags('-I')
 end
-def ccclean
-  args = []
-  while arg = ARGV.shift
-    case arg
-    when '-arch', /^-Xarch_/
-      ARGV.shift
-    when /^-g\d?/, /^-gstabs\d+/, '-gstabs+', /^-ggdb\d?/, '-gdwarf-2',
-         /^-march=.+/, /^-mtune=.+/, '-m64', '-m32',
-         /^-O[0-9zs]/, '-fast',
-         %r{^-[IL]/opt/local}, %r{^-[IL]/sw},
-         '-pedantic', '-pedantic-errors'
-      #NOOP
-    when /^-W.*/
-      args << arg if arg =~ /^-Wl,/
+
+class Cmd
+  def initialize path, args
+    @tool = path.basename.freeze
+    @args = args.freeze
+    @mode = case @tool
+      when 'cpp' then :cpp
+      when 'ld' then :ld
+    when /^clang/, /^llvm/, 'gcc', 'g++', 'cc', 'c++', nil
+      if args.include? '-c'
+        :cc
+      elsif args.include? '-E'
+        :cpp
+      else
+        :ld # compile *and* link mode usually but args will be same
+      end
     else
-      args << arg
-    end
+      abort "Unknown command: #{path}"
+    end.freeze
   end
-  args
-end
-def xcrun cmd, *args
-  if nclt?
-    exec "xcrun", cmd, *args.compact
-  else
-    exec "/usr/bin/#{cmd}", *args.compact
+  def parsed_args
+    args = []
+    origargs = @args.dup
+    while arg = origargs.shift
+      case arg
+      when '-arch', /^-Xarch_/
+        origargs.shift
+      when /^-g\d?/, /^-gstabs\d+/, '-gstabs+', /^-ggdb\d?/, '-gdwarf-2',
+           /^-march=.+/, /^-mtune=.+/, '-m64', '-m32',
+           /^-O[0-9zs]/, '-fast',
+           %r{^-[IL]/opt/local}, %r{^-[IL]/sw},
+           '-pedantic', '-pedantic-errors'
+      when /^-W.*/
+        args << arg if arg =~ /^-Wl,/
+      when /^-I(.*)/
+        args << arg unless cmake_prefixes.include? $1.cleanpath
+      else
+        args << arg
+      end
+    end
+    args
+  end
+  def args
+    args = if ccc? 'O' and false
+      parsed_args
+    else
+      @args.dup
+    end
+    args.unshift("--sysroot=#$sdkroot") if nclt?
+    case @mode
+    when :cpp
+      args.unshift("-E") unless args.include? '-E'
+    when :cc
+      args.unshift("-c") unless args.include? '-c'
+    end
+    case @mode
+    when :cpp
+      cppflags + args
+    when :cc
+      cflags + cppflags + args
+    when :ld
+      args = cflags + cppflags + args if @tool != "ld"
+      ldflags + args
+    end.compact
+  end
+  def xcrun
+    # we invoke CC for all modes because build systems suck and this is more reliable
+    cc = case @tool
+      when 'ld', 'cpp' then ENV['CC'].basename.chuzzle || 'clang'
+      else @tool
+    end
+    if nclt?
+      %W{xcrun #{cc}}
+    else
+      %W{/usr/bin/#{cc}}
+    end
   end
 end
 
+####################################################################### extend
+class String
+  def parent; File.dirname self end
+  def directory?; File.directory? self end
+  def basename; File.basename self end
+  def chuzzle; s = chomp; s unless s.empty? end
+  def cleanpath; require 'pathname'; Pathname.new(self).realpath.to_s rescue self end
+end
+class NilClass
+  def chuzzle; end
+  def directory?; false end
+  def parent; end
+  def split(x); [] end
+end
+class Array
+  def to_flags prefix
+    select{|path| path.directory? }.uniq.map{|path| prefix+path }
+  end
+end
 module Kernel extend self
   alias :_exec :exec
   def exec *args
@@ -113,44 +153,10 @@ module Kernel extend self
   end
 end if ENV['HOMEBREW_LOG']
 
-######################################################################## setup
-$0 = $0.basename
-$0 = case $0 when 'cc' then 'clang' when 'c++' then 'clang++' else $0 end
-$brewfix = File.expand_path("#{__FILE__}/../../../../")
-$sdkroot = ENV['HOMEBREW_SDKROOT']
+####################################################################### global
+$brewfix = "#{__FILE__}/../../../../".cleanpath.freeze
+$sdkroot = ENV['HOMEBREW_SDKROOT'].freeze
 
-####################################################################### sanity
-abort "Bad driver" unless driver
-
-######################################################################## logic
-args = if ccc? 'O' and (driver == :clang or driver == :gcc)
-  ccclean
-else
-  ARGV
-end
-
-newarg = if driver == :ld
-  "-syslibroot=#$sdkroot"
-else
-  "--sysroot=#$sdkroot"
-end if nclt?
-args.unshift(newarg)
-
-case driver
-when :ld
-  xcrun "ld", *(ldflags + args)
-when :cpp
-  cpp = case ENV['CC'] when 'clang', 'cc', nil
-    args.unshift '-E'
-    "clang"
-  else
-    $0
-  end
-  xcrun cpp, *(cppflags + args)
-else
-  if args.include? '-c'
-    xcrun $0, *(cflags + cppflags + args)
-  else
-    xcrun $0, *(cflags + cppflags + ldflags + args)
-  end
-end
+######################################################################### main
+cmd = Cmd.new($0, ARGV)
+exec *(cmd.xcrun + cmd.args)
