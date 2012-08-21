@@ -3,6 +3,9 @@
 #TODO look for formula that adjust LDFLAGS/CPPFLAGS for deps and make them work
 #TODO try to create /usr/local/opt before merge
 #TODO? If we find -mmacosx-version-min=10.8, change sdkroot? warn visibly if no such SDK?
+#TODO fix pkg-config files, should point to /usr/local or /usr/local/opt
+
+require 'set'
 
 def ccc? flags
   flags.split('').all?{|c| ENV['HOMEBREW_CCC'].include? c } if ENV['HOMEBREW_CCC']
@@ -17,10 +20,8 @@ end
 def cmake_prefixes
   @prefixes ||= ENV['CMAKE_PREFIX_PATH'].split(':').reject do |path|
     case path
-    when '/usr/local'
-      !nclt?
-    when '/usr', '/', "#$sdkroot/usr"
-      true
+      when '/usr/local' then !nclt?
+      when '/usr', '/', "#$sdkroot/usr" then true
     end
   end
 end
@@ -59,7 +60,7 @@ class Cmd
   end
   def args
     args = if ccc? 'O'
-      parsed_args
+      refurbished_args
     else
       @args.dup
     end
@@ -82,13 +83,15 @@ class Cmd
       %W{/usr/bin/#{tool}}
     end
   end
-  def parsed_args
+  def refurbished_args
+    iset = Set.new(cmake_prefixes.map{|prefix| "#{prefix}/include" })
+    lset = Set.new
     args = []
-    origargs = @args.dup
-    while arg = origargs.shift
-      case arg
+    whittler = @args.each
+    loop do
+      case arg = whittler.next
       when '-arch', /^-Xarch_/
-        origargs.shift
+        whittler.next
       when /^-g\d?/, /^-gstabs\d+/, '-gstabs+', /^-ggdb\d?/, '-gdwarf-2',
            /^-march=.+/, /^-mtune=.+/, '-m64', '-m32',
            /^-O[0-9zs]/, '-fast',
@@ -96,8 +99,13 @@ class Cmd
            '-pedantic', '-pedantic-errors'
       when /^-W.*/
         args << arg if arg =~ /^-Wl,/
-      when /^-I(.*)/
-        args << arg unless cmake_prefixes.include? $1.cleanpath
+      when /^-I(.+)/
+        # it is okay to add a space after the -I; so let's support it
+        path = $1.chuzzle || whittler.next
+        args << "-I#{path}" if iset.add?(path.cleanpath)
+      when /^-l(.+)/
+        lib = $1.chuzzle || whittler.next
+        args << "-l#{lib}" if lset.add?(lib)
       else
         args << arg
       end
@@ -149,7 +157,13 @@ module Kernel extend self
   alias :_exec :exec
   def exec *args
     path = File.expand_path('~/Library/Logs/Homebrew/cc.log')
-    open(path, 'a'){|f| f.puts(args.join(' ')); f.puts }
+    open(path, 'a') do |f|
+      f.print '[', $0
+      f.print " -%s" % ENV['HOMEBREW_CCC'] if ENV['HOMEBREW_CCC']
+      f.print '] '
+      f.puts args.join(' ')
+      f.puts
+    end
     _exec *args
   end
 end if ENV['HOMEBREW_LOG']

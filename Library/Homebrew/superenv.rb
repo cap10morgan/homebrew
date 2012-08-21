@@ -91,18 +91,19 @@ class << ENV
       raise
     end
   rescue
-    MacOS.default_compiler.to_s
+    # Not clang, eg. dirac detects for cl*) (windows compiler) in its
+    # configure.
+    "cc" 
   end
 
   def determine_cxx
-    detcc = Proc.new do |cc|
-      case cc.to_s
-        when "clang" then "clang++"
-        when "llvm-gcc" then "llvm-g++"
-        when "gcc" then "g++"
-      end
+    case cc.to_s
+      when "clang" then "clang++"
+      when "llvm-gcc" then "llvm-g++"
+      when "gcc" then "g++"
+    else
+      "c++"
     end
-    detcc.call(ENV['CC']) or detcc.call(MacOS.default_compiler) or "c++"
   end
 
   def determine_path
@@ -153,7 +154,7 @@ class << ENV
     case ENV['CC']
       when "llvm-gcc" then :llvm
       when "gcc", "clang" then ENV['CC'].to_sym
-      when nil then MacOS.default_compiler
+      when "cc", nil then MacOS.default_compiler
     else
       raise
     end
