@@ -446,6 +446,7 @@ class Formula
       s <<
         <<-EOS.undent_________________________________________________________72
 
+
         Generally there are no consequences of this for you. If you build your
         own software and it requires this formula, you'll need to add to your
         build variables:
